@@ -1,174 +1,251 @@
 # BioSentry
 
-**Pharmacovigilance platform for the early detection of drug side effects.**
+**Turn scattered public health data into an early drug-safety signal.**
 
-BioSentry gathers data from public medical sources, extracts and normalises the side effects that are
-mentioned, aggregates them per *(drug, side effect, period)* triple, and then runs clustering and
-anomaly-detection models to surface weak signals and attach an alert level.
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![MongoDB](https://img.shields.io/badge/MongoDB-biosentry__db-47A248?logo=mongodb&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-BioBERT_NLP-EE4C2C?logo=pytorch&logoColor=white)
+![scikit-learn](https://img.shields.io/badge/scikit--learn-clustering_and_anomalies-F7931E?logo=scikitlearn&logoColor=white)
+![Research](https://img.shields.io/badge/use-academic_research_only-C0392B)
 
-> **Team:** Aya Chakour · Amal Afenich · Oumaima Enajjari · Khouloud El Hajji
+BioSentry is a pharmacovigilance platform that monitors public medical sources for mentions of drug
+side effects, measures how those mentions evolve month after month, and raises a graded alert when a
+*(drug, side effect, period)* combination behaves abnormally. It combines biomedical NLP, source
+credibility scoring and an ensemble of unsupervised models to surface **weak signals worth
+investigating** — earlier than manual surveillance would.
+
+**Team:** Aya Chakour · Amal Afenich · Oumaima Enajjari · Khouloud El Hajji
 
 ---
+
+## Contents
+
+- [Why BioSentry](#why-biosentry)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Demo](#demo)
+- [Pipeline](#pipeline)
+- [Machine learning](#machine-learning)
+- [Data sources](#data-sources)
+- [Data model](#data-model)
+- [Repository layout](#repository-layout)
+- [Getting started](#getting-started)
+- [Running the pipeline](#running-the-pipeline)
+- [Outputs](#outputs)
+- [Responsible use and limitations](#responsible-use-and-limitations)
+- [Deliverables](#deliverables)
+- [Tech stack](#tech-stack)
+
+---
+
+## Why BioSentry
+
+Pre-market clinical trials are intentionally small and short: they can only detect common, early
+adverse reactions. Rare or delayed effects emerge later, once a drug is prescribed at scale — and
+post-market surveillance has to piece together evidence that is scattered across official
+monographs, literature databases, trial registries, regulatory reports, commercial sites and
+patient communities.
+
+Manual review of those sources does not scale. BioSentry replaces the manual pass with an
+auditable pipeline:
+
+| Stage          | Manual approach                     | BioSentry                                          |
+| -------------- | ----------------------------------- | -------------------------------------------------- |
+| Collection     | One source at a time, by hand       | 7 sources collected automatically                  |
+| Normalisation  | Inconsistent terminology            | Unified medical vocabulary and time axis           |
+| Credibility    | Assumed equal                       | Quantified per source (HITS authority score)       |
+| Detection      | Eyeballing spreadsheets             | 6 unsupervised models in ensemble                  |
+| Triage         | Subjective priority                 | Explicit levels: `NORMAL` → `CRITIQUE`             |
+
+> **Objective:** accelerate the moment a safety signal becomes visible, while keeping a human expert
+> in the loop. BioSentry is a decision-support tool, never a substitute for clinical judgement.
+
+## Features
+
+- **Unified ingestion** — REST APIs and Selenium scrapers feeding a single MongoDB database.
+- **Biomedical NLP** — BioBERT-based entity recognition (drug, side effect, symptom, dosage),
+  classification and VADER sentiment analysis.
+- **Source credibility** — HITS authority scoring over a citation graph stored in Neo4j, so a mention
+  from a peer-reviewed source does not weigh the same as an anonymous forum post.
+- **Temporal normalisation** — every mention is mapped onto a common `(drug, side_effect, YYYY-MM)`
+  axis covering 2019–2026.
+- **Quality control** — completeness, text-length and provenance flags attached to each document.
+- **Signal discovery** — three clustering algorithms to group comparable signals, three anomaly
+  detectors to spot abnormal mention spikes.
+- **Graded alerting** — an ensemble rule converts detector votes into `NORMAL`, `MODEREE`, `ELEVEE`
+  or `CRITIQUE`.
+- **Reproducible** — everything is driven by scripts and configuration; no credentials in code.
 
 ## Architecture
 
-![BioSentry architecture](livrables/architecture.png)
+```mermaid
+flowchart TD
+    classDef source fill:#EAF2FF,stroke:#2563EB,stroke-width:1px,color:#1E3A8A
+    classDef process fill:#FFF8E7,stroke:#D97706,stroke-width:1px,color:#78350F
+    classDef store fill:#E9FBF3,stroke:#059669,stroke-width:1px,color:#064E3B
+    classDef model fill:#F3EEFF,stroke:#7C3AED,stroke-width:1px,color:#4C1D95
+    classDef alert fill:#FEECEC,stroke:#DC2626,stroke-width:1px,color:#7F1D1D
 
-```
- Sources : MedlinePlus · PubMed · ClinicalTrials.gov · openFDA ·
-           Drugs.com · WebMD · Reddit
-                         |
-                         v
-        Drug list (RxNorm, by ATC class) ──> drug_list
-                         |
-                         v
-              Scrapers / APIs  (collection)
-                         |
-                         v
-   NLP (BioBERT) + source authority score (HITS, Neo4j)
-                         |
-                         v
-   Normalisation + date extraction ──> normalised_sources
-                         |
-                         v
-             Quality control (quality_flags)
-                         |
-                         v
- MongoDB Atlas (biosentry_db)
-   drug_list -> data_aggregation -> ml_predictions
-                         |
-                         v
- AI models
-   - clustering : K-Means, Agglomerative, HDBSCAN
-   - anomalies  : rolling Z-score, Isolation Forest, LOF
-                         |
-                         v
-      Alert level (alerte.py) ──> Dashboard
+    subgraph sources["Stage 1 — Public sources"]
+        direction LR
+        mp["MedlinePlus<br/>monographs"]:::source
+        pm["PubMed<br/>literature"]:::source
+        ct["ClinicalTrials.gov<br/>trials"]:::source
+        fda["openFDA<br/>FAERS reports"]:::source
+        dc["Drugs.com<br/>reviews"]:::source
+        wb["WebMD<br/>reviews"]:::source
+        rd["Reddit<br/>patient posts"]:::source
+    end
+
+    rxnorm["RxNorm API<br/>ATC-class drug list"]:::process
+    collect["Collection layer<br/>Selenium scrapers and REST APIs"]:::process
+
+    sources --> collect
+    rxnorm --> collect
+
+    nlp["Biomedical NLP<br/>BioBERT NER, classifier, VADER"]:::process
+    hits["Source authority<br/>HITS on Neo4j graph"]:::process
+    norm["Normalisation and date extraction<br/>common axis 2019-2026"]:::process
+    quality["Quality control<br/>completeness, length, provenance"]:::process
+
+    collect --> nlp
+    collect --> hits
+    nlp --> norm
+    hits --> norm
+    norm --> quality
+
+    subgraph mongo["MongoDB — biosentry_db"]
+        direction LR
+        c1["drug_list"]:::store
+        c2["normalised_sources"]:::store
+        c3["data_aggregation"]:::store
+        c4["ml_predictions"]:::store
+    end
+
+    rxnorm --> c1
+    c1 --> collect
+    quality --> c2
+    c2 --> c3
+
+    subgraph ml["Machine learning layer"]
+        direction TB
+        cl["Clustering<br/>K-Means, Agglomerative, HDBSCAN"]:::model
+        an["Anomaly detection<br/>Rolling Z-score, Isolation Forest, LOF"]:::model
+        ens["Ensemble scorer — alerte.py"]:::model
+        cl --> ens
+        an --> ens
+    end
+
+    c3 --> ml
+    ens --> c4
+
+    dash["Dashboard<br/>NORMAL / MODEREE / ELEVEE / CRITIQUE"]:::alert
+    c4 --> dash
 ```
 
----
+| Layer          | Components                                                | Responsibility                                     |
+| -------------- | --------------------------------------------------------- | -------------------------------------------------- |
+| Sources        | MedlinePlus, PubMed, ClinicalTrials, openFDA, Drugs.com, WebMD, Reddit | Raw evidence about adverse effects                 |
+| Vocabulary     | RxNorm                                                    | Defines *which* drugs are monitored (ATC classes)  |
+| Collection     | `01.Rxnorm`, `02.Scrapers`                                | Retrieval, throttling, upsert into MongoDB         |
+| Understanding  | `03.NLP`, `04.Hits`, `05.Normalisation_et_Dates`, `07.Data_quality` | Entities, credibility, dates, quality flags        |
+| Storage        | MongoDB `biosentry_db`                                    | `drug_list` → `normalised_sources` → `data_aggregation` → `ml_predictions` |
+| Modelling      | `Modèles_ai/clustering`, `Modèles_ai/anomalie_detection`  | Groups signals, flags anomalies, assigns alert     |
+| Consumption    | Dashboard                                                 | Prioritised list of signals under investigation    |
 
 ## Demo
 
-**Dashboard demonstration (video):**
+**Walkthrough of the dashboard:**
 [▶ Watch the demo video](livrables/Dashboard/2026-05-24%2003-47-16.mp4)
 
----
+## Pipeline
 
-## Table of contents
+| # | Phase            | Entry point                                                        | Writes to               |
+| - | ---------------- | ------------------------------------------------------------------ | ----------------------- |
+| 1 | Drug dictionary  | `collecte_des_données/01.Rxnorm/rxnorm_builder.py`                 | `drug_list`             |
+| 2 | Collection       | `collecte_des_données/02.Scrapers/*.py`                            | raw source collections  |
+| 3 | NLP              | `collecte_des_données/03.NLP/nlp_biobert.py`                       | enriched documents      |
+| 4 | Source authority | `collecte_des_données/04.Hits/hits_authority.py`                    | authority scores        |
+| 5 | Normalisation    | `collecte_des_données/05.Normalisation_et_Dates/*.py`               | `normalised_sources`    |
+| 6 | Quality control  | `collecte_des_données/07.Data_quality/quality_flags.py`             | quality flags           |
+| 7 | Aggregation      | (produced during normalisation)                                    | `data_aggregation`      |
+| 8 | Clustering       | `Modèles_ai/clustering/*.py`                                       | cluster labels (JSON)   |
+| 9 | Anomaly detection| `Modèles_ai/anomalie_detection/*.py`                               | `ml_predictions`        |
+| 10| Alerting         | `Modèles_ai/anomalie_detection/alerte.py`                          | `alert_level`           |
 
-- [Context and problem statement](#context-and-problem-statement)
-- [Objectives](#objectives)
-- [Repository structure](#repository-structure)
-- [Data sources](#data-sources)
-- [Data schema](#data-schema)
-- [Models](#models)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Dashboard](#dashboard)
-- [Deliverables](#deliverables)
-- [Limitations and warnings](#limitations-and-warnings)
-- [Technologies](#technologies)
+## Machine learning
 
----
+### Input
 
-## Context and problem statement
+Every model reads `data_aggregation`, one row per *(drug, side effect, period)* with
+`mention_count`. Features are standardised with `StandardScaler` before modelling.
 
-Clinical trials run before a drug is marketed involve a limited number of patients over a short
-period of time: rare or delayed side effects often only appear once the drug is in wide use.
-Pharmacovigilance exists to monitor those effects after commercialisation, but the information is
-spread across many different sources (official monographs, scientific publications, clinical
-trials, adverse-event databases, patient forums) and analysing it manually is slow.
+### Clustering — grouping comparable signals
 
-BioSentry brings these sources into a single database, tracks how the mentions of side effects
-evolve over time, and automatically flags abnormal behaviour with several complementary
-algorithms. The goal is to help raise a signal worth investigating **earlier** — not to replace
-the judgement of a healthcare professional.
+| Algorithm        | Role                                                                 |
+| ---------------- | -------------------------------------------------------------------- |
+| K-Means          | Fast baseline partition of the signal space                          |
+| Agglomerative    | Hierarchical structure, no need to preset *k* a priori               |
+| HDBSCAN          | Density-based: isolates signal clusters, outliers and noise — the outlier group acts as a critical-flag candidate list |
 
-## Objectives
+The three are benchmarked with silhouette, Calinski-Harabasz and Davies-Bouldin scores
+(`comparaison_modèle_clustering.py`, PCA visualisation) and merged into `combined_clusters.json`
+by `fusion_final.py`.
 
-- Centralise heterogeneous data about drug adverse effects
-- Extract and normalise medical entities (drugs, effects, symptoms, dosages) with biomedical NLP
-- Weight source reliability with an authority score (HITS)
-- Identify groups of similar signals (clustering)
-- Detect abnormal mention spikes over time (anomaly detection)
-- Produce an actionable alert level: `NORMAL`, `MODEREE`, `ELEVEE`, `CRITIQUE`
+### Anomaly detection — spotting abnormal spikes
 
-## Repository structure
+| Detector          | Principle                                                          |
+| ----------------- | ------------------------------------------------------------------ |
+| Rolling Z-score   | Deviation from a moving baseline, window adapted to series length  |
+| Isolation Forest  | Isolates observations that are easy to separate from the majority  |
+| LOF               | Local density deviation against neighbouring points                |
 
+### Ensemble alerting
+
+```mermaid
+flowchart LR
+    t["Triplet<br/>drug · side effect · period"] --> z["Rolling Z-score"]
+    t --> i["Isolation Forest"]
+    t --> l["Local Outlier Factor"]
+    z --> n{"Detectors<br/>in alert"}
+    i --> n
+    l --> n
+    n -->|"3"| crit["CRITIQUE"]
+    n -->|"2"| high["ELEVEE"]
+    n -->|"1"| med["MODEREE"]
+    n -->|"0"| ok["NORMAL"]
 ```
-.
-├── .env.example                     # All credentials / endpoints (copy to .env)
-├── .gitignore
-├── requirements.txt
-├── README.md
-└── livrables/
-    ├── architecture.png             # Architecture diagram
-    ├── Presentation_BioSentry.pdf   # Project presentation
-    ├── Rapport_de_projet.pdf        # Project report
-    ├── Dashboard/
-    │   └── 2026-05-24 03-47-16.mp4  # Dashboard demo video
-    ├── collecte_des_données/
-    │   ├── 01.Rxnorm/
-    │   │   └── rxnorm_builder.py                    # drug_list via the RxNorm API (ATC classes)
-    │   ├── 02.Scrapers/
-    │   │   ├── biosentry_medlineplus_scraper_full.py # MedlinePlus (Selenium + BeautifulSoup)
-    │   │   ├── scraper_pubmed.py                    # PubMed (NCBI E-utilities API)
-    │   │   ├── scraper_clinicaltrials.py            # ClinicalTrials.gov (API v2)
-    │   │   ├── scraper_openfda.py                   # openFDA (adverse-event reports)
-    │   │   ├── scraper_drugscom.py                  # Drugs.com (Selenium)
-    │   │   ├── scraper_webmd.py                     # WebMD (Selenium)
-    │   │   └── scraper_reddit.py                    # Reddit (patient posts)
-    │   ├── 03.NLP/
-    │   │   └── nlp_biobert.py                       # BioBERT NER + classifier + VADER sentiment
-    │   ├── 04.Hits/
-    │   │   └── hits_authority.py                    # HITS authority score for sources (Neo4j)
-    │   ├── 05.Normalisation_et_Dates/
-    │   │   ├── biosentry_normalisation.py           # Term cleaning and normalisation
-    │   │   ├── Date_Extraction.py                   # Date extraction and harmonisation
-    │   │   └── merge_normalized_with_dates.py       # Merge normalised data with dates
-    │   ├── 06.database_mongodb/                     # Sample JSON exports (no cluster needed)
-    │   │   ├── 00.drug_list.json                    # drug list (bootstraps the scrapers)
-    │   │   ├── 03_data_entrainement_final.json      # aggregated data (model input)
-    │   │   ├── 01_raw_sources.json .json            # not versioned (105 MB, shared separately)
-    │   │   └── 02_data_post_nlp_dates.json   .json  # not versioned (22 MB, shared separately)
-    │   └── 07.Data_quality/
-    │       └── quality_flags.py                     # Data-quality flags
-    └── Modèles_ai/
-        ├── clustering/
-        │   ├── kmeans_clustering.py
-        │   ├── agglomeratif.py
-        │   ├── hdbscan.py
-        │   ├── comparaison_modèle_clustering.py     # 3-model comparison (silhouette, CH, DB)
-        │   ├── fusion_final.py                      # Fusion of the 3 clusterings
-        │   └── *.json                               # Clustering results
-        └── anomalie_detection/
-            ├── zscore_rolling.py
-            ├── iforest.py
-            ├── anomalies_lof.py
-            ├── alerte.py                            # Final alert level
-            └── *.json                               # Detection results
-```
+
+| Detectors agreeing | Alert level |
+| ------------------ | ----------- |
+| 3                  | `CRITIQUE`  |
+| 2                  | `ELEVEE`    |
+| 1                  | `MODEREE`   |
+| 0                  | `NORMAL`    |
+
+Agreement between independent algorithms is the confidence proxy: one vote is a lead, three votes
+are a priority.
 
 ## Data sources
 
-| Source         | Method                              | Content                                             |
-| -------------- | ----------------------------------- | --------------------------------------------------- |
-| RxNorm         | NLM REST API                        | Drug list per therapeutic class (ATC)               |
-| MedlinePlus    | Scraping (Selenium + BeautifulSoup) | Drug monographs, classes, brand names, side effects |
-| PubMed         | NCBI E-utilities API                | Articles on adverse effects (2019–2026)             |
-| ClinicalTrials | API v2                              | Clinical trials related to adverse effects (2019–2026) |
-| openFDA        | API `drug/event`                    | Adverse-event reports (FAERS)                       |
-| Drugs.com      | Scraping (Selenium)                 | Reviews and reported side effects                   |
-| WebMD          | Scraping (Selenium)                 | Reviews and reported side effects                   |
-| Reddit         | HTTP requests on targeted subreddits| Patient testimonials                                |
+| Source          | Access method                         | Extracted content                              |
+| --------------- | ------------------------------------- | ---------------------------------------------- |
+| RxNorm (NLM)    | REST API                              | Drug list per ATC class                        |
+| MedlinePlus     | Selenium + BeautifulSoup              | Monographs, classes, brand names, side effects |
+| PubMed          | NCBI E-utilities                      | Literature on adverse effects, 2019–2026       |
+| ClinicalTrials  | API v2                                | Trials involving adverse effects, 2019–2026    |
+| openFDA         | `drug/event` API                      | FAERS adverse-event reports                    |
+| Drugs.com       | Selenium                              | Consumer reviews and side-effect reports       |
+| WebMD           | Selenium                              | Consumer reviews and side-effect reports       |
+| Reddit          | HTTP over targeted subreddits         | Patient testimony                              |
 
-> **Warning:** MedlinePlus monographs are copyrighted (ASHP). Their use in this project is strictly
-> limited to academic research. The terms of use of every scraped site must be respected.
+> **Legal note:** MedlinePlus monographs are copyrighted (ASHP) and used here strictly for academic
+> research. The terms of every scraped site must be respected — rate limits, robots rules and
+> attribution included.
 
-## Data schema
+## Data model
 
-### Raw MedlinePlus document (one document per drug)
+### Raw MedlinePlus document
 
 ```json
 {
@@ -188,118 +265,92 @@ the judgement of a healthcare professional.
 }
 ```
 
-| Field                 | Type           | Description                                  |
-| --------------------- | -------------- | -------------------------------------------- |
-| `url`                 | text           | Source MedlinePlus page                      |
-| `drug_name`           | text           | Drug name                                    |
-| `drug_class`          | text           | Therapeutic class                            |
-| `brand_names`         | list of text   | Brand names                                  |
-| `prescribed_for`      | list of text   | Indications                                  |
-| `side_effects.mild`   | list of text   | Mild side effects                            |
-| `side_effects.serious`| list of text   | Serious side effects                         |
-| `side_effects.total`  | integer        | Total number of side effects                 |
-| `warnings`            | list of text   | Warnings                                     |
-| `source`              | text           | Origin of the data                           |
-| `scraped_at`          | text           | Collection date and time                     |
+### MongoDB collections — `biosentry_db`
 
-### MongoDB collections (`biosentry_db`)
+| Collection           | Key fields                                                                     | Purpose                                          |
+| -------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------ |
+| `drug_list`          | `name`, `category`                                                             | Scope of surveillance (drugs to query)           |
+| `normalised_sources` | `text_clean`, `side_effects`, `year_month`, `authority_score`, `source`         | Cleaned, dated, credibility-weighted mentions    |
+| `data_aggregation`   | `drug`, `side_effect`, `period`, `mention_count`                               | Model input: mention counts per month            |
+| `ml_predictions`     | `lof_anomaly`, `iforest_anomaly`, `zscore_anomaly`, `nb_algos`, `alert_level`  | Detector outputs and final alert                 |
 
-| Collection           | Main fields                                                        | Role                                                                |
-| -------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| `drug_list`          | `name`, `category`                                                 | Drugs to query (PubMed, ClinicalTrials, …)                          |
-| `normalised_sources` | normalised text, extracted entities, dates, authority score        | Cleaned data coming from every source                               |
-| `data_aggregation`   | `drug`, `side_effect`, `period` (YYYY-MM), `mention_count`         | Mention counts per drug/effect/month — model input                  |
-| `ml_predictions`     | `drug`, `side_effect`, `period`, `lof_anomaly`, `iforest_anomaly`, `zscore_anomaly`, `nb_algos`, `alert_level` | Detector outputs and final alert level |
+## Repository layout
 
-## Models
-
-### NLP pre-processing
-
-- Entity extraction (drugs, side effects, symptoms, dosages) with a **BioBERT** model, completed by
-  a classifier and a **VADER** sentiment analysis.
-- Source authority score computed with the **HITS** algorithm (graph stored in **Neo4j**) to weight
-  the reliability of each source.
-- Term normalisation and date extraction (period 2019–2026), then a quality-control pass
-  (`quality_flags.py`).
-
-### Clustering
-
-Applied to the aggregated data (`data_aggregation`) with standardised variables (`StandardScaler`):
-
-- **K-Means**
-- **Agglomerative** clustering
-- **HDBSCAN** — separates signal clusters, outlier points (critical flags in pharmacovigilance) and noise
-
-`comparaison_modèle_clustering.py` compares the models with the silhouette, Calinski-Harabasz and
-Davies-Bouldin metrics (PCA visualisation). `fusion_final.py` merges the three results into
-`combined_clusters.json`.
-
-### Anomaly detection
-
-Features used: mention count, mean, standard deviation, total mentions, number of periods, month.
-
-- **Rolling Z-score** (window adapted to the length of each series)
-- **Isolation Forest**
-- **Local Outlier Factor (LOF)**
-
-### Alert level
-
-`alerte.py` counts how many algorithms flag an anomaly for the same
-*(drug, side effect, period)* triplet:
-
-| Algorithms in alert | Level     |
-| ------------------- | --------- |
-| 3                   | `CRITIQUE`|
-| 2                   | `ELEVEE`  |
-| 1                   | `MODEREE` |
-| 0                   | `NORMAL`  |
-
-## Installation
-
-**Prerequisites:** Python 3.10+, a MongoDB cluster (Atlas or local), Google Chrome (Selenium
-scrapers) and a local Neo4j instance (only for the HITS computation).
-
-```bash
-git clone https://github.com/amalafenich/biosentry.git
-cd biosentry
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm   # spaCy model used by the normalisation step
+```
+.
+├── .env.example                      # All credentials and endpoints (copy to .env)
+├── .gitignore
+├── .gitattributes                    # Git LFS rule for the demo video
+├── requirements.txt
+├── README.md
+└── livrables/
+    ├── architecture.png              # Architecture diagram (static export)
+    ├── Presentation_BioSentry.pdf    # Project presentation
+    ├── Rapport_de_projet.pdf         # Project report
+    ├── Dashboard/
+    │   └── 2026-05-24 03-47-16.mp4   # Dashboard demo (Git LFS)
+    ├── collecte_des_données/
+    │   ├── 01.Rxnorm/rxnorm_builder.py
+    │   ├── 02.Scrapers/              # 7 collectors (API + Selenium)
+    │   ├── 03.NLP/nlp_biobert.py
+    │   ├── 04.Hits/hits_authority.py
+    │   ├── 05.Normalisation_et_Dates/
+    │   ├── 06.database_mongodb/      # Sample JSON exports
+    │   └── 07.Data_quality/quality_flags.py
+    └── Modèles_ai/
+        ├── clustering/               # K-Means, agglomerative, HDBSCAN, comparison, fusion
+        └── anomalie_detection/       # Z-score, iForest, LOF, alerte.py
 ```
 
-**Configuration** — every credential and endpoint lives in the environment, never in the code:
+## Getting started
+
+**Prerequisites:** Python 3.10+, a MongoDB cluster (Atlas or local), Google Chrome for the Selenium
+scrapers, a local Neo4j instance for the HITS score (Elasticsearch optional), and
+[Git LFS](https://git-lfs.com) to clone the demo video.
+
+```bash
+git clone https://github.com/Ayaa-ch/Biosentry-project.git
+cd Biosentry-project
+git lfs pull
+
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m spacy download en_core_web_sm
+```
+
+### Configuration
+
+Secrets never live in the code — copy the template and fill it in:
 
 ```bash
 cp .env.example .env
 ```
 
-Then fill in `.env`:
+| Variable           | Required | Purpose                                        |
+| ------------------ | -------- | ---------------------------------------------- |
+| `MONGO_URI`        | yes      | MongoDB connection string                      |
+| `NCBI_API_KEY`     | no       | Higher NCBI/PubMed rate limit                  |
+| `NCBI_EMAIL`       | recomm.  | Contact address sent with NCBI requests        |
+| `OPENFDA_API_KEY`  | no       | Higher openFDA rate limit                      |
+| `NEO4J_URI`        | for HITS | Neo4j bolt URI                                 |
+| `NEO4J_USER`       | for HITS | Neo4j user                                     |
+| `NEO4J_PASSWORD`   | for HITS | Neo4j password                                 |
+| `ES_HOST`          | no       | Elasticsearch URL (HITS index)                 |
+| `ES_INDEX`         | no       | Elasticsearch index name                       |
+| `CONTACT_EMAIL`    | no       | Contact in the MedlinePlus user-agent          |
 
-| Variable            | Purpose                                            |
-| ------------------- | -------------------------------------------------- |
-| `MONGO_URI`         | MongoDB connection string (required everywhere)    |
-| `NCBI_API_KEY`      | NCBI/PubMed API key (optional, higher rate limit)  |
-| `NCBI_EMAIL`        | Contact email sent with NCBI requests              |
-| `OPENFDA_API_KEY`   | openFDA key (optional, higher rate limit)          |
-| `NEO4J_URI`         | Neo4j URI for the HITS score                       |
-| `NEO4J_USER`        | Neo4j user                                         |
-| `NEO4J_PASSWORD`    | Neo4j password                                     |
-| `ES_HOST`           | Elasticsearch URL (optional, HITS index)           |
-| `ES_INDEX`          | Elasticsearch index name                           |
-| `CONTACT_EMAIL`     | Contact address in the MedlinePlus user-agent      |
+`.env` is covered by `.gitignore` — **never commit it**.
 
-The `.env` file is excluded by `.gitignore` — **never commit it**.
+## Running the pipeline
 
-## Usage
-
-Recommended execution order:
+Run the phases in order; each one depends on the collection written by the previous one.
 
 ```bash
-# 1. Drug list (creates the drug_list collection)
+# 1 — drug dictionary
 python "livrables/collecte_des_données/01.Rxnorm/rxnorm_builder.py"
 
-# 2. Collection
+# 2 — collection
 python "livrables/collecte_des_données/02.Scrapers/biosentry_medlineplus_scraper_full.py"
 python "livrables/collecte_des_données/02.Scrapers/scraper_pubmed.py"
 python "livrables/collecte_des_données/02.Scrapers/scraper_clinicaltrials.py"
@@ -308,17 +359,17 @@ python "livrables/collecte_des_données/02.Scrapers/scraper_drugscom.py"
 python "livrables/collecte_des_données/02.Scrapers/scraper_webmd.py"
 python "livrables/collecte_des_données/02.Scrapers/scraper_reddit.py"
 
-# 3. NLP, source authority, normalisation and dates
-#    (biosentry_normalisation.py imports nlp_biobert and hits_authority:
-#     the three modules must be reachable from the PYTHONPATH)
+# 3 — NLP, source authority, normalisation, dates
+#     (biosentry_normalisation.py imports nlp_biobert and hits_authority:
+#      the three modules must be importable from the PYTHONPATH)
 python "livrables/collecte_des_données/05.Normalisation_et_Dates/biosentry_normalisation.py"
 python "livrables/collecte_des_données/05.Normalisation_et_Dates/Date_Extraction.py"
 python "livrables/collecte_des_données/05.Normalisation_et_Dates/merge_normalized_with_dates.py"
 
-# 4. Quality control
+# 4 — quality control
 python "livrables/collecte_des_données/07.Data_quality/quality_flags.py"
 
-# 5. Clustering (run from the model folder)
+# 5 — clustering (run from the model folder)
 cd "livrables/Modèles_ai/clustering"
 python kmeans_clustering.py
 python agglomeratif.py
@@ -327,7 +378,7 @@ python "comparaison_modèle_clustering.py"
 python fusion_final.py
 cd ../../..
 
-# 6. Anomaly detection
+# 6 — anomaly detection and alerting
 cd "livrables/Modèles_ai/anomalie_detection"
 python zscore_rolling.py
 python iforest.py
@@ -335,43 +386,58 @@ python anomalies_lof.py
 python alerte.py
 ```
 
-**Remarks:**
+**Notes**
 
-- The scrapers read the drug list from the `drug_list` collection, which must exist before they run.
-- The model scripts read the `data_aggregation` collection; `alerte.py` reads `ml_predictions`.
-- `fusion_final.py` expects a file named `agglo_results.json`: rename `agglomeratif_results.json`
-  if necessary.
-- The JSON files in `livrables/collecte_des_données/06.database_mongodb/` let you inspect the data
-  without re-running the whole collection pipeline: `00.drug_list.json` and
-  `03_data_entrainement_final.json` are versioned, while the heavy raw/intermediate exports
-  (`01_raw_sources…`, `02_data_post_nlp_dates…`, 105 MB and 22 MB) are **not** committed — they are
-  shared separately as an archive.
-- The dashboard demo video is stored with **Git LFS** (`git lfs track "livrables/Dashboard/*.mp4"`),
-  since it is larger than GitHub's 100 MB file limit.
+- The scrapers read `drug_list`; build it before collecting.
+- Clustering and anomaly scripts read `data_aggregation`; `alerte.py` reads `ml_predictions`.
+- `fusion_final.py` expects `agglo_results.json` — rename `agglomeratif_results.json` first.
+- Skipping the heavy collection is possible: `06.database_mongodb/` ships `00.drug_list.json` and
+  `03_data_entrainement_final.json` (the large raw exports are distributed separately as an
+  archive, they are not versioned).
 
-## Dashboard
+## Outputs
 
-A video demonstration of the dashboard is available here:
-**[Watch the demo video](livrables/Dashboard/2026-05-24%2003-47-16.mp4)**
+- `ml_predictions` — one document per triplet with the three detector flags, the number of
+  agreeing algorithms and the final `alert_level`.
+- `combined_clusters.json` — fused cluster membership for the three clustering models.
+- Per-model JSON exports (`*_results.json`, `*_anomalies.json`) next to each script, for
+  inspection and reporting.
+- Dashboard — prioritised, filterable view of the signals by alert level.
+
+## Responsible use and limitations
+
+- **Not medical advice.** BioSentry highlights patterns to investigate; it establishes no causal
+  link between a drug and an adverse event.
+- **Reporting bias.** Mention counts reflect what is published and reported, not real incidence —
+  spikes may follow media attention rather than a safety problem.
+- **Human review required.** Every `CRITIQUE` signal must be assessed by a qualified
+  pharmacovigilance professional before any action.
+- **Source terms apply.** Scraping is restricted to academic use; MedlinePlus content is
+  copyrighted (ASHP).
 
 ## Deliverables
 
-- Project presentation: `livrables/Presentation_BioSentry.pdf`
-- Project report: `livrables/Rapport_de_projet.pdf`
-- Collection, processing and modelling code
-- Collected data and model results as JSON
-- Dashboard demo video (link above)
+| Artifact                          | Path                                              |
+| --------------------------------- | ------------------------------------------------- |
+| Architecture diagram              | `livrables/architecture.png`                      |
+| Project presentation              | `livrables/Presentation_BioSentry.pdf`            |
+| Project report                    | `livrables/Rapport_de_projet.pdf`                 |
+| Pipeline code                     | `livrables/collecte_des_données/`                 |
+| Models and results                | `livrables/Modèles_ai/`                           |
+| Dashboard demo video              | `livrables/Dashboard/` (Git LFS)                  |
+| Sample data exports               | `livrables/collecte_des_données/06.database_mongodb/` |
 
-## Limitations and warnings
+## Tech stack
 
-- BioSentry is a **research/academic** tool: it highlights signals to investigate, it does not
-  establish causality and must not be used as medical advice.
-- Mention counts reflect what is published and reported, not real incidence rates (reporting bias).
-- Scraped content depends on the availability and terms of use of each source.
-- MedlinePlus monographs are copyrighted (ASHP) and restricted to academic use.
+| Layer            | Technologies                                                                 |
+| ---------------- | ---------------------------------------------------------------------------- |
+| Data             | pandas, NumPy, PyMongo, requests, lxml                                       |
+| Scraping         | Selenium, webdriver-manager, BeautifulSoup, tqdm                             |
+| NLP              | PyTorch, Hugging Face Transformers (BioBERT), spaCy, VADER                   |
+| Graph / search   | Neo4j, Elasticsearch                                                         |
+| Machine learning | scikit-learn, HDBSCAN                                                        |
+| Settings         | python-dotenv (`.env` — never committed)                                     |
 
-## Technologies
+---
 
-Python, pandas, NumPy, scikit-learn, HDBSCAN, PyMongo, Neo4j, Elasticsearch, Selenium,
-BeautifulSoup, requests, lxml, spaCy, PyTorch, Hugging Face Transformers (BioBERT), VADER,
-python-dotenv, tqdm.
+*BioSentry is an academic project. Use it for research and education only.*
