@@ -1,0 +1,27 @@
+# ---------- Data handling ----------
+pymongo
+python-dotenv
+requests
+lxml
+
+# ---------- Web scraping ----------
+selenium
+webdriver-manager
+beautifulsoup4
+tqdm
+
+# ---------- Machine learning ----------
+numpy
+pandas
+scikit-learn
+hdbscan
+
+# ---------- NLP (bio-medical) ----------
+spacy
+torch
+transformers
+vaderSentiment
+
+# ---------- Graph & search (HITS authority score) ----------
+neo4j
+elasticsearch
